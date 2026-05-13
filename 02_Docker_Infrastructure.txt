@@ -107,7 +107,7 @@ services:
       - MINIO_ROOT_PASSWORD=password123
     ports:
       - "9000:9000"
-      - "29001:9001"
+      - "29001:9001" # Đã sửa thành 29001 cho host Windows
     volumes:
       - minio_data:/data
     networks:
