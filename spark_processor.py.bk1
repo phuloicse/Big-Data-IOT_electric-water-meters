@@ -4,17 +4,16 @@ from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 
 spark_version = pyspark.__version__
+scala_version = "2.13" if spark_version.startswith("4") else "2.12"
 
-# BỘ THƯ VIỆN CHUẨN CHO SPARK 3.5.1
-packages = (
-    "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,"
-    "org.apache.hadoop:hadoop-aws:3.3.4,"
-    "com.amazonaws:aws-java-sdk-bundle:1.12.262,"
-    "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.3"
-)
+# --- BẢN VÁ LỖI: Đồng bộ thư viện AWS S3 với chính xác phiên bản Hadoop 3.4.2 của Spark 4 ---
+kafka_pkg = f"org.apache.spark:spark-sql-kafka-0-10_{scala_version}:{spark_version}"
+minio_pkgs = "org.apache.hadoop:hadoop-aws:3.4.2,com.amazonaws:aws-java-sdk-bundle:1.12.367"
+packages = f"{kafka_pkg},{minio_pkgs}"
 
-print(f"=== ĐANG KHỞI ĐỘNG SPARK {spark_version} (Scala 2.12) ===")
+print(f"=== ĐANG KHỞI ĐỘNG SPARK {spark_version} (Scala {scala_version}) ===")
 
+# Khởi tạo SparkSession với cấu hình bảo mật chuẩn SDK v2
 spark = SparkSession.builder \
     .appName("SmartHomeStreaming") \
     .master("local[*]") \
@@ -27,8 +26,6 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
     .config("spark.hadoop.fs.s3a.endpoint.region", "us-east-1") \
     .config("spark.hadoop.fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider") \
-    .config("spark.hadoop.fs.s3a.connection.timeout", "60000") \
-    .config("spark.hadoop.fs.s3a.connection.establish.timeout", "60000") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -55,38 +52,22 @@ parsed_df = kafka_df.selectExpr("CAST(value AS STRING) as json_str") \
     .select(from_json(col("json_str"), schema).alias("data")) \
     .select("data.*")
 
+# Lọc bỏ các bản ghi bị lỗi kỹ thuật (chỉ số đo < 0)
 cleaned_df = parsed_df.filter(col("current_usage") >= 0)
 
-print("-> Đang ghi dữ liệu chuẩn hóa xuống Console, MinIO và Elasticsearch...")
+print(f"-> Đang ghi dữ liệu chuẩn hóa xuống MinIO bucket 'iot-data-lake'...")
 
-# Luồng 1: Console
 query_console = cleaned_df.writeStream \
     .outputMode("append") \
     .format("console") \
     .option("truncate", "false") \
     .start()
 
-# Luồng 2: MinIO (Data Lake)
 query_minio = cleaned_df.writeStream \
     .outputMode("append") \
     .format("parquet") \
     .option("path", "s3a://iot-data-lake/smart_home_data/") \
-    .option("checkpointLocation", "s3a://iot-data-lake/checkpoints_minio/") \
-    .start()
-
-# --- LUỒNG 3: ELASTICSEARCH DÙNG FOREACH-BATCH (ĐÃ FIX LỖI TƯƠNG THÍCH) ---
-def write_to_es(batch_df, batch_id):
-    batch_df.write \
-        .format("es") \
-        .option("es.nodes", "localhost") \
-        .option("es.port", "9200") \
-        .option("es.nodes.wan.only", "true") \
-        .option("es.index.auto.create", "true") \
-        .mode("append") \
-        .save("smart_home_data")
-
-query_es = cleaned_df.writeStream \
-    .foreachBatch(write_to_es) \
+    .option("checkpointLocation", "s3a://iot-data-lake/checkpoints/") \
     .start()
 
 spark.streams.awaitAnyTermination()
